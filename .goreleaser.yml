@@ -17,7 +17,7 @@ builds:
     # Specify the main package location
     main: ./cmd/csql/
     # Output binary name
-    binary: csql
+    binary: go-csql
     # Use linker flags to strip debug info and reduce binary size
     ldflags:
       - -s -w
