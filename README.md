@@ -164,3 +164,9 @@ docker run --rm -v "$(pwd):/app" -w /app ghcr.io/chaoshour/go-csql:latest \
 
 - Go 1.18+
 - MySQL driver (installed automatically via Go modules)
+
+## Inspired by
+
+- [ccql](https://github.com/github/ccql)
+
+Thank you! Shlomi Noach
