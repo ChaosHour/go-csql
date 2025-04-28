@@ -12,7 +12,7 @@ $(BINARY):
 	go build -o $(BINARY) ./cmd/csql
 
 clean:
-	rm -rf $(BIN_DIR)
+	rm -rf $(BIN_DIR)/*
 
 # Build Docker image
 docker-build:
