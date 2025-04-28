@@ -1,0 +1,68 @@
+# .goreleaser.yml
+# Visit https://goreleaser.com/customization/ for more options
+before:
+  hooks:
+    # Ensure dependencies are tidy before building
+    - go mod tidy
+builds:
+  - # Build configuration for the 'csql' binary
+    # Build for Linux, macOS, and Windows on amd64 and arm64 architectures
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Specify the main package location
+    main: ./cmd/csql/
+    # Output binary name
+    binary: csql
+    # Use linker flags to strip debug info and reduce binary size
+    ldflags:
+      - -s -w
+archives:
+  - # Archive configuration
+    # Create archives for different platforms
+    format: tar.gz # Use tar.gz for non-windows
+    # Use zip for windows
+    format_overrides:
+      - goos: windows
+        format: zip
+    # Include README and LICENSE if they exist
+    files:
+      - README.md
+      # - LICENSE # Uncomment if you have a LICENSE file
+
+checksum:
+  # Generate checksums for the archives
+  name_template: 'checksums.txt'
+
+snapshot:
+  # Configuration for snapshot builds (e.g., on main branch pushes)
+  # We are not using this for tag releases, but it's good practice to define
+  name_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  # Automatically generate changelog from commit messages
+  sort: asc
+  filters:
+    # Exclude certain commit types from the changelog
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  # GitHub Release configuration
+  # Draft releases allow review before publishing
+  draft: false
+  # Prerelease will be marked automatically if the tag is like v1.0.0-rc1
+  prerelease: auto
+  # Optional: Name template for the release title
+  # name_template: "{{.ProjectName}}-{{.Tag}}"
+
+# Optional: Announce release to Slack, Discord, etc.
+# See goreleaser documentation for integrations.
