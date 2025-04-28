@@ -22,7 +22,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /csql ./cmd/csql
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /go-csql ./cmd/csql
 
 # ---- Final Stage ----
 FROM ubuntu:latest
@@ -34,7 +34,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the static binary from the builder stage
-COPY --from=builder /csql /usr/local/bin/csql
+COPY --from=builder /go-csql /usr/local/bin/go-csql
 
 # Set the entrypoint
-ENTRYPOINT ["/usr/local/bin/csql"]
+ENTRYPOINT ["/usr/local/bin/go-csql"]

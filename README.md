@@ -25,11 +25,11 @@ make build
 Run specific statements against comma-separated instances:
 
 ```bash
-./bin/csql --instances="user:pass@tcp(host1:3306)/db1,user:pass@tcp(host2:3306)/db2" \
+./bin/go-csql --instances="user:pass@tcp(host1:3306)/db1,user:pass@tcp(host2:3306)/db2" \
            --statements="SELECT version();SHOW TABLES"
 
 
-./bin/csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql,root:s3cr3t@tcp(192.168.50.50:3307)/mysql" \
+./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql,root:s3cr3t@tcp(192.168.50.50:3307)/mysql" \
            --table --statements="show databases"
 Executing statements on 2 instance(s) (concurrent: true)...
 [root:s3cr3t@tcp(192.168.50.50:3307)/mysql] show databases
@@ -65,7 +65,7 @@ All executions complete.
 # SELECT * FROM users;
 # SELECT COUNT(*) FROM orders;
 
-./bin/csql --instances="user:pass@tcp(host1:3306)/db1" --file=statements.sql
+./bin/go-csql --instances="user:pass@tcp(host1:3306)/db1" --file=statements.sql
 ```
 
 **3. Instances via Flags, SQL from Text File (`--sqlfile`)**
@@ -77,7 +77,7 @@ This is similar to `--file` but might be preferred for clarity.
 # SELECT * FROM products;
 # DELETE FROM logs WHERE timestamp < NOW() - INTERVAL 1 DAY;
 
-./bin/csql --instances="user:pass@tcp(host1:3306)/db1" --sqlfile=queries.txt
+./bin/go-csql --instances="user:pass@tcp(host1:3306)/db1" --sqlfile=queries.txt
 ```
 
 **4. Instances from JSON File (`--json`), Statements via Flags**
@@ -89,13 +89,13 @@ This is similar to `--file` but might be preferred for clarity.
 #   {"dsn": "user:pass@tcp(host2:3306)/db2"}
 # ]
 
-./bin/csql --json=servers.json --statements="SELECT @@hostname;"
+./bin/go-csql --json=servers.json --statements="SELECT @@hostname;"
 ```
 
 **5. Instances from JSON, SQL from Text File
 
 ```bash
-./bin/csql --json=servers.json --sqlfile=queries.txt
+./bin/go-csql --json=servers.json --sqlfile=queries.txt
 ```
 
 **6. Using `~/.my.cnf` Credentials**
@@ -110,10 +110,10 @@ If you have a `~/.my.cnf` file with `[client]` credentials (user, password, host
 # host=db.example.com
 
 # You can then omit credentials/host if they match .my.cnf:
-./bin/csql --instances="@tcp(:3306)/db1" --statements="SELECT 1"
+./bin/go-csql --instances="@tcp(:3306)/db1" --statements="SELECT 1"
 # This would connect using myuser:mypass@tcp(db.example.com:3306)/db1
 
-./bin/csql --instances="@tcp(:3307)/mysql" --statements="show slave status\G" | awk -v RS='\n ' '
+./bin/go-csql --instances="@tcp(:3307)/mysql" --statements="show slave status\G" | awk -v RS='\n ' '
 {
     if ($1 ~ /Master_Host|Slave_IO_Running|Slave_SQL_Running|Seconds_Behind_Master|Retrieved_Gtid_Set|Executed_Gtid_Set/) {
         split($0, a, ": ");
@@ -136,7 +136,7 @@ Master_SSL_Verify_Server_Cert: No
 Run queries sequentially against each instance instead of concurrently:
 
 ```bash
-./bin/csql --instances="inst1,inst2" --statements="SELECT 1" --concurrent=false
+./bin/go-csql --instances="inst1,inst2" --statements="SELECT 1" --concurrent=false
 ```
 
 ### Docker

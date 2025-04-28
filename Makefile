@@ -1,5 +1,5 @@
 BIN_DIR := bin
-BINARY := $(BIN_DIR)/csql
+BINARY := $(BIN_DIR)/go-csql
 
 .PHONY: all build clean docker-build
 
