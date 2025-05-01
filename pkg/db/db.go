@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	// Needed for robust DSN parsing
 	"github.com/fatih/color"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/olekukonko/tablewriter" // Import tablewriter
@@ -154,9 +155,38 @@ func splitSQLStatements(sqls string) []StatementInfo {
 	return statements
 }
 
+// maskPasswordInDSN takes a DSN string and returns a version with the password masked.
+func maskPasswordInDSN(dsn string) string {
+	// Attempt to parse the DSN as a URL-like string to handle various formats
+	// MySQL DSN format: [user[:password]@][protocol[(address)]]/dbname[?param1=value1&...]
+	// We need to handle the part before the first '/' which isn't standard URL parsing.
+
+	// Find the '@' symbol separating user/pass from the host info
+	atIndex := strings.Index(dsn, "@")
+	if atIndex == -1 {
+		return dsn // No user/password info found
+	}
+
+	userInfo := dsn[:atIndex]
+	hostInfo := dsn[atIndex+1:]
+
+	// Split user info into user and password
+	userPass := strings.SplitN(userInfo, ":", 2)
+	user := userPass[0]
+
+	if len(userPass) == 2 {
+		// Password exists, mask it
+		return user + ":****@" + hostInfo
+	}
+
+	// No password, return as is (user@host...)
+	return dsn
+}
+
 // PrintResult prints the query result, handling vertical and table formats.
 func PrintResult(res QueryResult, instanceColor *color.Color, useTableFormat bool) { // Added useTableFormat param
-	instanceStr := instanceColor.SprintFunc()("[" + res.Instance + "]")
+	maskedDSN := maskPasswordInDSN(res.Instance)                     // Mask the password
+	instanceStr := instanceColor.SprintFunc()("[" + maskedDSN + "]") // Use masked DSN
 	if res.Err != nil {
 		errorColor := color.New(color.FgRed).SprintFunc()
 		fmt.Printf("%s %s %s: %v\n", instanceStr, errorColor("ERROR"), res.Statement, res.Err)
