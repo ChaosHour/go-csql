@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync" // Import sync package
 
@@ -22,6 +25,102 @@ var instanceColors = []*color.Color{
 	color.New(color.FgRed),
 }
 
+// Server represents a database server configuration
+type Server struct {
+	DSN      string `json:"dsn,omitempty"`      // Traditional DSN format
+	User     string `json:"user,omitempty"`     // Separate user field
+	Password string `json:"password,omitempty"` // Separate password field
+	Host     string `json:"host,omitempty"`     // Separate host field
+	Port     string `json:"port,omitempty"`     // Separate port field
+	Database string `json:"database,omitempty"` // Separate database field
+}
+
+// BuildDSN constructs a proper DSN from Server fields, handling complex passwords
+func (s *Server) BuildDSN() string {
+	if s.DSN != "" {
+		return s.DSN // Use DSN if provided
+	}
+
+	// Build DSN from individual components
+	var dsn strings.Builder
+
+	if s.User != "" {
+		dsn.WriteString(s.User)
+		if s.Password != "" {
+			dsn.WriteString(":")
+			// URL encode the password to handle special characters
+			dsn.WriteString(url.QueryEscape(s.Password))
+		}
+		dsn.WriteString("@")
+	}
+
+	dsn.WriteString("tcp(")
+	if s.Host != "" {
+		dsn.WriteString(s.Host)
+	} else {
+		dsn.WriteString("localhost")
+	}
+
+	if s.Port != "" {
+		dsn.WriteString(":")
+		dsn.WriteString(s.Port)
+	} else {
+		dsn.WriteString(":3306")
+	}
+	dsn.WriteString(")")
+
+	if s.Database != "" {
+		dsn.WriteString("/")
+		dsn.WriteString(s.Database)
+	}
+
+	return dsn.String()
+}
+
+// expandPath expands ~ to home directory in file paths
+func expandPath(path string) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(homeDir, path[2:]), nil
+	}
+	return path, nil
+}
+
+// stripJSONComments removes comment lines from JSON content while preserving strings that may contain #
+func stripJSONComments(content []byte) []byte {
+	lines := strings.Split(string(content), "\n")
+	var cleanLines []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Only skip lines that are pure comments (start with # and are not inside JSON strings)
+		// A line is a comment if it starts with # and doesn't contain JSON syntax like quotes, braces, etc.
+		if strings.HasPrefix(trimmed, "#") && !containsJSONSyntax(trimmed) {
+			continue // Skip comment lines
+		}
+		if trimmed != "" || len(cleanLines) > 0 { // Keep non-empty lines or preserve structure
+			cleanLines = append(cleanLines, line)
+		}
+	}
+
+	return []byte(strings.Join(cleanLines, "\n"))
+}
+
+// containsJSONSyntax checks if a line contains JSON syntax characters that would indicate it's not a pure comment
+func containsJSONSyntax(line string) bool {
+	// Look for JSON syntax that would indicate this is not a pure comment
+	jsonChars := []string{`"`, `'`, `{`, `}`, `[`, `]`, `:`, `,`}
+	for _, char := range jsonChars {
+		if strings.Contains(line, char) {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
 	// CLI flags
 	instances := flag.String("instances", "", "Comma-separated list of MySQL instance connection strings (user:password@tcp(host:port)/dbname)")
@@ -29,9 +128,19 @@ func main() {
 	file := flag.String("file", "", "Path to a file containing SQL statements (overrides --statements)")
 	jsonFile := flag.String("json", "", "Path to a JSON file with server and schema information (overrides --instances)")
 	sqlFile := flag.String("sqlfile", "", "Path to a .txt file with SQL statements (overrides --statements and --file)")
+	stdin := flag.Bool("stdin", false, "Read SQL statements from standard input (pipe support)")
 	concurrent := flag.Bool("concurrent", true, "Run queries against instances concurrently")
-	tableFormat := flag.Bool("table", false, "Format tabular output with borders") // New flag
+	tableFormat := flag.Bool("table", false, "Format tabular output with borders")
+	verbose := flag.Int("v", 0, "Verbosity level (1-3): -v, -vv, -vvv for increasing verbosity")
 	flag.Parse()
+
+	// Handle -v, -vv, -vvv style flags
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, "-v") && !strings.Contains(arg, "=") {
+			*verbose = len(arg) - 1 // -v=1, -vv=2, -vvv=3
+			break
+		}
+	}
 
 	if *instances == "" && *jsonFile == "" {
 		fmt.Println("Error: --instances or --json is required")
@@ -44,22 +153,31 @@ func main() {
 	myCnf, _ = db.ParseMyCnf() // ignore error if file doesn't exist
 
 	if *jsonFile != "" {
-		// JSON file format: [{"dsn": "user:password@tcp(host:port)/dbname"}, ...]
-		content, err := os.ReadFile(*jsonFile)
+		// Expand ~ to home directory
+		expandedPath, err := expandPath(*jsonFile)
+		if err != nil {
+			fmt.Printf("Failed to expand JSON file path: %v\n", err)
+			os.Exit(1)
+		}
+
+		// JSON file format supports both DSN strings and individual components
+		content, err := os.ReadFile(expandedPath)
 		if err != nil {
 			fmt.Printf("Failed to read JSON file: %v\n", err)
 			os.Exit(1)
 		}
-		var servers []struct {
-			DSN string `json:"dsn"` // Corrected json tag
-		}
-		err = json.Unmarshal(content, &servers)
+
+		// Strip comments from JSON content
+		cleanContent := stripJSONComments(content)
+
+		var servers []Server
+		err = json.Unmarshal(cleanContent, &servers)
 		if err != nil {
 			fmt.Printf("Failed to parse JSON: %v\n", err)
 			os.Exit(1)
 		}
 		for _, s := range servers {
-			dsnToUse := s.DSN
+			dsnToUse := s.BuildDSN() // Build DSN with proper password encoding
 			if myCnf != nil {
 				// Apply .my.cnf credentials respecting existing host info
 				if !dsnHasHost(dsnToUse) {
@@ -80,6 +198,7 @@ func main() {
 			if dsnToUse == "" {
 				continue
 			}
+			dsnToUse = sanitizeDSN(dsnToUse) // Sanitize complex passwords
 			if myCnf != nil {
 				// Apply .my.cnf credentials respecting existing host info
 				if !dsnHasHost(dsnToUse) {
@@ -102,15 +221,39 @@ func main() {
 
 	// --- Load SQL Statements ---
 	var sqls string
-	if *sqlFile != "" {
-		content, err := os.ReadFile(*sqlFile)
+	if *stdin {
+		// Read from standard input
+		scanner := bufio.NewScanner(os.Stdin)
+		var lines []string
+		for scanner.Scan() {
+			lines = append(lines, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Printf("Error reading from stdin: %v\n", err)
+			os.Exit(1)
+		}
+		sqls = strings.Join(lines, "\n")
+	} else if *sqlFile != "" {
+		// Expand ~ to home directory
+		expandedPath, err := expandPath(*sqlFile)
+		if err != nil {
+			fmt.Printf("Failed to expand SQL file path: %v\n", err)
+			os.Exit(1)
+		}
+		content, err := os.ReadFile(expandedPath)
 		if err != nil {
 			fmt.Printf("Failed to read SQL file: %v\n", err)
 			os.Exit(1)
 		}
 		sqls = string(content)
 	} else if *file != "" {
-		content, err := os.ReadFile(*file)
+		// Expand ~ to home directory
+		expandedPath, err := expandPath(*file)
+		if err != nil {
+			fmt.Printf("Failed to expand file path: %v\n", err)
+			os.Exit(1)
+		}
+		content, err := os.ReadFile(expandedPath)
 		if err != nil {
 			fmt.Printf("Failed to read file: %v\n", err)
 			os.Exit(1)
@@ -119,7 +262,7 @@ func main() {
 	} else if *statements != "" {
 		sqls = *statements
 	} else {
-		fmt.Println("Error: must provide --sqlfile, --file, or --statements")
+		fmt.Println("Error: must provide --stdin, --sqlfile, --file, or --statements")
 		os.Exit(1)
 	}
 
@@ -175,6 +318,32 @@ func main() {
 	}
 
 	fmt.Println("All executions complete.")
+}
+
+// sanitizeDSN safely handles complex passwords by URL encoding them
+func sanitizeDSN(dsn string) string {
+	// Parse DSN format: user:password@tcp(host:port)/database
+	atIndex := strings.LastIndex(dsn, "@")
+	if atIndex == -1 {
+		return dsn // Return as-is if not in expected format
+	}
+
+	userPass := dsn[:atIndex]
+	rest := dsn[atIndex:]
+
+	// Split user:password
+	colonIndex := strings.Index(userPass, ":")
+	if colonIndex == -1 {
+		return dsn // Return as-is if no password
+	}
+
+	user := userPass[:colonIndex]
+	password := userPass[colonIndex+1:]
+
+	// URL encode the password to handle special characters
+	encodedPassword := url.QueryEscape(password)
+
+	return user + ":" + encodedPassword + rest
 }
 
 // dsnHasHost returns true if the DSN contains a host in the tcp(...) section

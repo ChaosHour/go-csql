@@ -27,8 +27,27 @@ Run specific statements against comma-separated instances:
 ```bash
 ./bin/go-csql --instances="user:pass@tcp(host1:3306)/db1,user:pass@tcp(host2:3306)/db2" \
            --statements="SELECT version();SHOW TABLES"
+```
 
+**2. Reading SQL from stdin (pipe support)
 
+Pipe SQL statements directly into go-csql:
+
+```bash
+cat test.sql | ./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql" --stdin
+
+# With verbosity (shows executed statements):
+cat test.sql | ./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql" --stdin -v
+
+# Higher verbosity levels:
+cat test.sql | ./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql" --stdin -vv
+cat test.sql | ./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql" --stdin -vvv
+```
+
+**3. Example output with verbosity:**
+
+```bash
+# Without verbosity:
 ./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql,root:s3cr3t@tcp(192.168.50.50:3307)/mysql" \
            --table --statements="show databases"
 Executing statements on 2 instance(s) (concurrent: true)...
@@ -56,9 +75,11 @@ Executing statements on 2 instance(s) (concurrent: true)...
 ---
 All executions complete.
 
+# With verbosity (-v):
+# Shows "-------------" separators and executed statements before results
 ```
 
-**2. Instances via Flags, SQL from File (`--file`)**
+**4. Instances via Flags, SQL from File (`--file`)**
 
 ```bash
 # statements.sql contains:
@@ -68,7 +89,7 @@ All executions complete.
 ./bin/go-csql --instances="user:pass@tcp(host1:3306)/db1" --file=statements.sql
 ```
 
-**3. Instances via Flags, SQL from Text File (`--sqlfile`)**
+**5. Instances via Flags, SQL from Text File (`--sqlfile`)**
 
 This is similar to `--file` but might be preferred for clarity.
 
@@ -80,58 +101,81 @@ This is similar to `--file` but might be preferred for clarity.
 ./bin/go-csql --instances="user:pass@tcp(host1:3306)/db1" --sqlfile=queries.txt
 ```
 
-**4. Instances from JSON File (`--json`), Statements via Flags**
+**6. Instances from JSON File (`--json`), Statements via Flags**
 
 ```bash
-# servers.json contains:
+# servers.json supports two formats:
+
+# Format 1: Individual components (recommended for complex passwords)
 # [
-#   {"dsn": "user:pass@tcp(host1:3306)/db1"},
-#   {"dsn": "user:pass@tcp(host2:3306)/db2"}
+#   {
+#     "user": "myuser",
+#     "password": "my@complex#password!$with&symbols",
+#     "host": "host1",
+#     "port": "3306",
+#     "database": "db1"
+#   },
+#   {
+#     "user": "user2", 
+#     "password": "another!complex@password#123",
+#     "host": "host2",
+#     "port": "3306", 
+#     "database": "db2"
+#   }
 # ]
+
+# Format 2: Traditional DSN format (for simple passwords)
+# [
+#   {"dsn": "user:simplepass@tcp(host1:3306)/db1"},
+#   {"dsn": "user2:pass123@tcp(host2:3306)/db2"}
+# ]
+
+# Using tilde (~) for home directory paths:
+./bin/go-csql --json=~/.servers.json --statements="SELECT @@hostname;"
+./bin/go-csql --json="~/.servers.json" --statements="SELECT @@hostname;"
 
 ./bin/go-csql --json=servers.json --statements="SELECT @@hostname;"
 ```
 
-**5. Instances from JSON, SQL from Text File
+**Note:** For complex passwords with special characters (@, #, !, $, &, etc.), use the individual component format in your JSON file. Passwords are automatically URL-encoded internally. JSON files support comments (lines starting with # that don't contain JSON syntax) for documentation purposes. Passwords that start with # are fully supported.
+
+**Example with password starting with #:**
+
+```json
+[
+  {
+    "user": "testuser",
+    "password": "#complex!password@123",
+    "host": "localhost",
+    "port": "3306",
+    "database": "testdb"
+  }
+]
+```
+
+**7. Instances from JSON, SQL from Text File
 
 ```bash
 ./bin/go-csql --json=servers.json --sqlfile=queries.txt
 ```
 
-**6. Using `~/.my.cnf` Credentials**
+**8. Using `~/.my.cnf` Credentials**
 
 If you have a `~/.my.cnf` file with `[client]` credentials (user, password, host, port, database), the CLI will automatically use them to fill in *missing* parts of the DSN provided via `--instances` or `--json`. Host/port from `.my.cnf` are only used if not specified in the DSN.
 
 ```bash
-# ~/.my.cnf might contain:
+# ~/.my.cnf might contain (complex passwords supported):
 # [client]
 # user=myuser
-# password=mypass
+# password=my@complex#password!
 # host=db.example.com
 
 # You can then omit credentials/host if they match .my.cnf:
 ./bin/go-csql --instances="@tcp(:3306)/db1" --statements="SELECT 1"
-# This would connect using myuser:mypass@tcp(db.example.com:3306)/db1
-
-./bin/go-csql --instances="@tcp(:3307)/mysql" --statements="show slave status\G" | awk -v RS='\n ' '
-{
-    if ($1 ~ /Master_Host|Slave_IO_Running|Slave_SQL_Running|Seconds_Behind_Master|Retrieved_Gtid_Set|Executed_Gtid_Set/) {
-        split($0, a, ": ");
-        print a[1] ": " substr($0, index($0, a[2]));
-    }
-}'
-                 Master_Host: 172.20.0.3
-            Slave_IO_Running: Yes
-           Slave_SQL_Running: Yes
-       Seconds_Behind_Master: 0
-Master_SSL_Verify_Server_Cert: No
-     Slave_SQL_Running_State: Replica has read all relay log; waiting for more updates
-          Retrieved_Gtid_Set: 6ef3e484-1e68-11f0-8a88-d66d6a16a219:1-196
-           Executed_Gtid_Set: 6ef3e484-1e68-11f0-8a88-d66d6a16a219:1-196,
-6ef56be4-1e68-11f0-97f4-7a1c5884f911:1-11
+# This would connect using myuser with the complex password from .my.cnf
 ```
 
-**7. Disabling Concurrency
+**9. Disabling Concurrency
 
 Run queries sequentially against each instance instead of concurrently:
 

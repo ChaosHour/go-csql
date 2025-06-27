@@ -157,30 +157,38 @@ func splitSQLStatements(sqls string) []StatementInfo {
 
 // maskPasswordInDSN takes a DSN string and returns a version with the password masked.
 func maskPasswordInDSN(dsn string) string {
-	// Attempt to parse the DSN as a URL-like string to handle various formats
 	// MySQL DSN format: [user[:password]@][protocol[(address)]]/dbname[?param1=value1&...]
-	// We need to handle the part before the first '/' which isn't standard URL parsing.
+	// We need to find the last '@' before the protocol part to handle passwords with '@' symbols
 
-	// Find the '@' symbol separating user/pass from the host info
-	atIndex := strings.Index(dsn, "@")
-	if atIndex == -1 {
+	// Find the protocol part first (tcp, unix, etc.)
+	protocolIdx := strings.Index(dsn, "tcp(")
+	if protocolIdx == -1 {
+		protocolIdx = strings.Index(dsn, "unix(")
+	}
+	if protocolIdx == -1 {
+		// No protocol found, might be a simple DSN format
+		return dsn
+	}
+
+	// Look for '@' before the protocol
+	atIdx := strings.LastIndex(dsn[:protocolIdx], "@")
+	if atIdx == -1 {
 		return dsn // No user/password info found
 	}
 
-	userInfo := dsn[:atIndex]
-	hostInfo := dsn[atIndex+1:]
+	userInfo := dsn[:atIdx]
+	hostInfo := dsn[atIdx+1:]
 
-	// Split user info into user and password
-	userPass := strings.SplitN(userInfo, ":", 2)
-	user := userPass[0]
-
-	if len(userPass) == 2 {
-		// Password exists, mask it
-		return user + ":****@" + hostInfo
+	// Find the first ':' in userInfo to separate user from password
+	colonIdx := strings.Index(userInfo, ":")
+	if colonIdx == -1 {
+		// No password, return as is
+		return dsn
 	}
 
-	// No password, return as is (user@host...)
-	return dsn
+	user := userInfo[:colonIdx]
+	// Password is everything between first ':' and the '@'
+	return user + ":****@" + hostInfo
 }
 
 // PrintResult prints the query result, handling vertical and table formats.
