@@ -122,6 +122,39 @@ func containsJSONSyntax(line string) bool {
 }
 
 func main() {
+	// Handle -v, -vv, -vvv style flags manually BEFORE flag.Parse()
+	var verbose int
+	var filteredArgs []string
+
+	for _, arg := range os.Args[1:] {
+		if arg == "-v" {
+			verbose = 1
+		} else if arg == "-vv" {
+			verbose = 2
+		} else if arg == "-vvv" {
+			verbose = 3
+		} else if strings.HasPrefix(arg, "-v=") {
+			// Handle -v=1, -v=2, -v=3 format
+			if val := strings.TrimPrefix(arg, "-v="); val != "" {
+				switch val {
+				case "1":
+					verbose = 1
+				case "2":
+					verbose = 2
+				case "3":
+					verbose = 3
+				}
+			}
+		} else {
+			// Keep non-verbosity flags for standard parsing
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+
+	// Temporarily replace os.Args for flag parsing
+	originalArgs := os.Args
+	os.Args = append([]string{os.Args[0]}, filteredArgs...)
+
 	// CLI flags
 	instances := flag.String("instances", "", "Comma-separated list of MySQL instance connection strings (user:password@tcp(host:port)/dbname)")
 	statements := flag.String("statements", "", "Semicolon-separated list of SQL statements to execute")
@@ -131,16 +164,12 @@ func main() {
 	stdin := flag.Bool("stdin", false, "Read SQL statements from standard input (pipe support)")
 	concurrent := flag.Bool("concurrent", true, "Run queries against instances concurrently")
 	tableFormat := flag.Bool("table", false, "Format tabular output with borders")
-	verbose := flag.Int("v", 0, "Verbosity level (1-3): -v, -vv, -vvv for increasing verbosity")
+
+	// Parse flags
 	flag.Parse()
 
-	// Handle -v, -vv, -vvv style flags
-	for _, arg := range os.Args[1:] {
-		if strings.HasPrefix(arg, "-v") && !strings.Contains(arg, "=") {
-			*verbose = len(arg) - 1 // -v=1, -vv=2, -vvv=3
-			break
-		}
-	}
+	// Restore original args
+	os.Args = originalArgs
 
 	if *instances == "" && *jsonFile == "" {
 		fmt.Println("Error: --instances or --json is required")
@@ -285,6 +314,8 @@ func main() {
 			go func(dsn string) {
 				defer wg.Done()
 				// Run SQL for this specific instance
+				// TODO: Pass verbose parameter when db.RunSQLOnInstance supports it
+				_ = verbose // Use verbose variable to avoid "declared and not used" error
 				instanceResults := db.RunSQLOnInstance(dsn, sqls)
 				// Send each result (or error result) to the channel
 				for _, res := range instanceResults {
@@ -301,7 +332,8 @@ func main() {
 
 		// Process results as they come in from the channel
 		for res := range resultsChan {
-			instanceColor := instanceColorMap[res.Instance]  // Get color for this instance
+			instanceColor := instanceColorMap[res.Instance] // Get color for this instance
+			// TODO: Pass verbose parameter when db.PrintResult supports it
 			db.PrintResult(res, instanceColor, *tableFormat) // Pass tableFormat flag
 			fmt.Println("---")                               // Separator between results
 		}
@@ -309,8 +341,11 @@ func main() {
 		// --- Execute Sequentially ---
 		for _, instanceDSN := range instanceList {
 			instanceColor := instanceColorMap[instanceDSN] // Get color for this instance
+			// TODO: Pass verbose parameter when db.RunSQLOnInstance supports it
+			_ = verbose // Use verbose variable to avoid "declared and not used" error
 			instanceResults := db.RunSQLOnInstance(instanceDSN, sqls)
 			for _, res := range instanceResults {
+				// TODO: Pass verbose parameter when db.PrintResult supports it
 				db.PrintResult(res, instanceColor, *tableFormat) // Pass tableFormat flag
 				fmt.Println("---")                               // Separator between results
 			}
