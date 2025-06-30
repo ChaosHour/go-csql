@@ -36,13 +36,18 @@ Pipe SQL statements directly into go-csql:
 ```bash
 cat test.sql | ./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql" --stdin
 
-# With verbosity (shows executed statements):
+# With verbosity (planned features similar to MySQL client):
 cat test.sql | ./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql" --stdin -v
+# -v: Shows executed statements with -------------- separators
 
-# Higher verbosity levels:
-cat test.sql | ./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql" --stdin -vv
+cat test.sql | ./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql" --stdin -vv  
+# -vv: Shows statements, separators, and row count information
+
 cat test.sql | ./bin/go-csql --instances="root:s3cr3t@tcp(192.168.50.50:3306)/mysql" --stdin -vvv
+# -vvv: Shows statements, separators, table format, and timing information
 ```
+
+**Note:** Verbosity flags are currently parsed but not fully implemented. The MySQL-style verbose output with statement separators and timing information requires updates to the database package.
 
 **3. Example output with verbosity:**
 
