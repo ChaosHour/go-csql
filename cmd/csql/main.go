@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync" // Import sync package
+	"sync"
 
 	"github.com/ChaosHour/go-csql/pkg/db"
 	"github.com/fatih/color"
@@ -23,6 +23,19 @@ var instanceColors = []*color.Color{
 	color.New(color.FgBlue),
 	color.New(color.FgMagenta),
 	color.New(color.FgRed),
+}
+
+// Config holds all configuration for the CLI application
+type Config struct {
+	Instances   string
+	Statements  string
+	File        string
+	JSONFile    string
+	SQLFile     string
+	Stdin       bool
+	Concurrent  bool
+	TableFormat bool
+	Verbose     int
 }
 
 // Server represents a database server configuration
@@ -77,6 +90,147 @@ func (s *Server) BuildDSN() string {
 	return dsn.String()
 }
 
+// parseVerbosityFlags handles -v, -vv, -vvv style flags manually
+func parseVerbosityFlags() (int, []string) {
+	var verbose int
+	var filteredArgs []string
+
+	for _, arg := range os.Args[1:] {
+		if arg == "-v" {
+			verbose = 1
+		} else if arg == "-vv" {
+			verbose = 2
+		} else if arg == "-vvv" {
+			verbose = 3
+		} else if strings.HasPrefix(arg, "-v=") {
+			// Handle -v=1, -v=2, -v=3 format
+			if val := strings.TrimPrefix(arg, "-v="); val != "" {
+				switch val {
+				case "1":
+					verbose = 1
+				case "2":
+					verbose = 2
+				case "3":
+					verbose = 3
+				}
+			}
+		} else {
+			// Keep non-verbosity flags for standard parsing
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+	return verbose, filteredArgs
+}
+
+// LoadFromFlags parses command line flags and populates the Config
+func (c *Config) LoadFromFlags() error {
+	// Handle verbosity flags first
+	verbose, filteredArgs := parseVerbosityFlags()
+	c.Verbose = verbose
+
+	// Temporarily replace os.Args for flag parsing
+	originalArgs := os.Args
+	os.Args = append([]string{os.Args[0]}, filteredArgs...)
+	defer func() { os.Args = originalArgs }()
+
+	// CLI flags
+	instances := flag.String("instances", "", "Comma-separated list of MySQL instance connection strings (user:password@tcp(host:port)/dbname)")
+	statements := flag.String("statements", "", "Semicolon-separated list of SQL statements to execute")
+	file := flag.String("file", "", "Path to a file containing SQL statements (overrides --statements)")
+	jsonFile := flag.String("json", "", "Path to a JSON file with server and schema information (overrides --instances)")
+	sqlFile := flag.String("sqlfile", "", "Path to a .txt file with SQL statements (overrides --statements and --file)")
+	stdin := flag.Bool("stdin", false, "Read SQL statements from standard input (pipe support)")
+	concurrent := flag.Bool("concurrent", true, "Run queries against instances concurrently")
+	tableFormat := flag.Bool("table", false, "Format tabular output with borders")
+
+	// Parse flags
+	flag.Parse()
+
+	// Populate config
+	c.Instances = *instances
+	c.Statements = *statements
+	c.File = *file
+	c.JSONFile = *jsonFile
+	c.SQLFile = *sqlFile
+	c.Stdin = *stdin
+	c.Concurrent = *concurrent
+	c.TableFormat = *tableFormat
+
+	return nil
+}
+
+// Validate checks if the configuration is valid
+func (c *Config) Validate() error {
+	if c.Instances == "" && c.JSONFile == "" {
+		return fmt.Errorf("--instances or --json is required")
+	}
+
+	sqlSourceCount := 0
+	if c.Stdin {
+		sqlSourceCount++
+	}
+	if c.SQLFile != "" {
+		sqlSourceCount++
+	}
+	if c.File != "" {
+		sqlSourceCount++
+	}
+	if c.Statements != "" {
+		sqlSourceCount++
+	}
+
+	if sqlSourceCount == 0 {
+		return fmt.Errorf("must provide --stdin, --sqlfile, --file, or --statements")
+	}
+
+	return nil
+}
+
+// validateDSN validates a MySQL DSN format
+func validateDSN(dsn string) error {
+	if dsn == "" {
+		return fmt.Errorf("DSN cannot be empty")
+	}
+
+	// Basic DSN format validation
+	// Expected format: [user[:password]@][protocol[(address)]]/dbname[?param1=value1&...]
+
+	// Check for protocol part
+	if !strings.Contains(dsn, "@tcp(") && !strings.Contains(dsn, "@unix(") && !strings.Contains(dsn, "@") {
+		return fmt.Errorf("invalid DSN format: missing protocol or @ symbol")
+	}
+
+	// If it contains @tcp( or @unix(, validate the structure
+	if strings.Contains(dsn, "@tcp(") || strings.Contains(dsn, "@unix(") {
+		protocolStart := strings.Index(dsn, "@")
+		if protocolStart == -1 {
+			return fmt.Errorf("invalid DSN format: malformed protocol section")
+		}
+
+		protocolEnd := strings.Index(dsn[protocolStart:], ")")
+		if protocolEnd == -1 {
+			return fmt.Errorf("invalid DSN format: unclosed protocol section")
+		}
+	}
+
+	return nil
+}
+
+// validateInstances validates a list of DSN strings
+func validateInstances(instances []string) error {
+	if len(instances) == 0 {
+		return fmt.Errorf("no instances provided")
+	}
+
+	for i, dsn := range instances {
+		if err := validateDSN(dsn); err != nil {
+			return fmt.Errorf("invalid DSN at index %d: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
 // expandPath expands ~ to home directory in file paths
 func expandPath(path string) (string, error) {
 	if strings.HasPrefix(path, "~/") {
@@ -121,180 +275,191 @@ func containsJSONSyntax(line string) bool {
 	return false
 }
 
-func main() {
-	// Handle -v, -vv, -vvv style flags manually BEFORE flag.Parse()
-	var verbose int
-	var filteredArgs []string
-
-	for _, arg := range os.Args[1:] {
-		if arg == "-v" {
-			verbose = 1
-		} else if arg == "-vv" {
-			verbose = 2
-		} else if arg == "-vvv" {
-			verbose = 3
-		} else if strings.HasPrefix(arg, "-v=") {
-			// Handle -v=1, -v=2, -v=3 format
-			if val := strings.TrimPrefix(arg, "-v="); val != "" {
-				switch val {
-				case "1":
-					verbose = 1
-				case "2":
-					verbose = 2
-				case "3":
-					verbose = 3
-				}
-			}
-		} else {
-			// Keep non-verbosity flags for standard parsing
-			filteredArgs = append(filteredArgs, arg)
-		}
-	}
-
-	// Temporarily replace os.Args for flag parsing
-	originalArgs := os.Args
-	os.Args = append([]string{os.Args[0]}, filteredArgs...)
-
-	// CLI flags
-	instances := flag.String("instances", "", "Comma-separated list of MySQL instance connection strings (user:password@tcp(host:port)/dbname)")
-	statements := flag.String("statements", "", "Semicolon-separated list of SQL statements to execute")
-	file := flag.String("file", "", "Path to a file containing SQL statements (overrides --statements)")
-	jsonFile := flag.String("json", "", "Path to a JSON file with server and schema information (overrides --instances)")
-	sqlFile := flag.String("sqlfile", "", "Path to a .txt file with SQL statements (overrides --statements and --file)")
-	stdin := flag.Bool("stdin", false, "Read SQL statements from standard input (pipe support)")
-	concurrent := flag.Bool("concurrent", true, "Run queries against instances concurrently")
-	tableFormat := flag.Bool("table", false, "Format tabular output with borders")
-
-	// Parse flags
-	flag.Parse()
-
-	// Restore original args
-	os.Args = originalArgs
-
-	if *instances == "" && *jsonFile == "" {
-		fmt.Println("Error: --instances or --json is required")
-		os.Exit(1)
-	}
-
-	// --- Load Instances ---
-	var instanceList []string
+// LoadInstances loads and processes database instances from config
+func (c *Config) LoadInstances() ([]string, error) {
 	var myCnf *db.MyCnf
 	myCnf, _ = db.ParseMyCnf() // ignore error if file doesn't exist
 
-	if *jsonFile != "" {
-		// Expand ~ to home directory
-		expandedPath, err := expandPath(*jsonFile)
-		if err != nil {
-			fmt.Printf("Failed to expand JSON file path: %v\n", err)
-			os.Exit(1)
-		}
+	var instanceList []string
+	var err error
 
-		// JSON file format supports both DSN strings and individual components
-		content, err := os.ReadFile(expandedPath)
-		if err != nil {
-			fmt.Printf("Failed to read JSON file: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Strip comments from JSON content
-		cleanContent := stripJSONComments(content)
-
-		var servers []Server
-		err = json.Unmarshal(cleanContent, &servers)
-		if err != nil {
-			fmt.Printf("Failed to parse JSON: %v\n", err)
-			os.Exit(1)
-		}
-		for _, s := range servers {
-			dsnToUse := s.BuildDSN() // Build DSN with proper password encoding
-			if myCnf != nil {
-				// Apply .my.cnf credentials respecting existing host info
-				if !dsnHasHost(dsnToUse) {
-					dsnToUse = db.FillDSN(dsnToUse, myCnf)
-				} else {
-					// Create a temporary cnf without host to fill other details
-					tempCnf := *myCnf
-					tempCnf.Host = "" // Don't override host from .my.cnf
-					dsnToUse = db.FillDSN(dsnToUse, &tempCnf)
-				}
-			}
-			instanceList = append(instanceList, dsnToUse)
-		}
+	if c.JSONFile != "" {
+		instanceList, err = c.loadInstancesFromJSON(myCnf)
 	} else {
-		rawInstances := strings.Split(*instances, ",")
-		for _, dsn := range rawInstances {
-			dsnToUse := strings.TrimSpace(dsn)
-			if dsnToUse == "" {
-				continue
+		instanceList, err = c.loadInstancesFromFlag(myCnf)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate all instances
+	if err := validateInstances(instanceList); err != nil {
+		return nil, fmt.Errorf("instance validation failed: %w", err)
+	}
+
+	return instanceList, nil
+}
+
+// loadInstancesFromJSON loads instances from JSON file
+func (c *Config) loadInstancesFromJSON(myCnf *db.MyCnf) ([]string, error) {
+	var instanceList []string
+
+	// Expand ~ to home directory
+	expandedPath, err := expandPath(c.JSONFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to expand JSON file path: %w", err)
+	}
+
+	// JSON file format supports both DSN strings and individual components
+	content, err := os.ReadFile(expandedPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read JSON file: %w", err)
+	}
+
+	// Strip comments from JSON content
+	cleanContent := stripJSONComments(content)
+
+	var servers []Server
+	err = json.Unmarshal(cleanContent, &servers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	for _, s := range servers {
+		dsnToUse := s.BuildDSN() // Build DSN with proper password encoding
+		if myCnf != nil {
+			// Apply .my.cnf credentials respecting existing host info
+			if !dsnHasHost(dsnToUse) {
+				dsnToUse = db.FillDSN(dsnToUse, myCnf)
+			} else {
+				// Create a temporary cnf without host to fill other details
+				tempCnf := *myCnf
+				tempCnf.Host = "" // Don't override host from .my.cnf
+				dsnToUse = db.FillDSN(dsnToUse, &tempCnf)
 			}
-			dsnToUse = sanitizeDSN(dsnToUse) // Sanitize complex passwords
-			if myCnf != nil {
-				// Apply .my.cnf credentials respecting existing host info
-				if !dsnHasHost(dsnToUse) {
-					dsnToUse = db.FillDSN(dsnToUse, myCnf)
-				} else {
-					// Create a temporary cnf without host to fill other details
-					tempCnf := *myCnf
-					tempCnf.Host = "" // Don't override host from .my.cnf
-					dsnToUse = db.FillDSN(dsnToUse, &tempCnf)
-				}
-			}
-			instanceList = append(instanceList, dsnToUse)
 		}
+		instanceList = append(instanceList, dsnToUse)
+	}
+
+	return instanceList, nil
+}
+
+// loadInstancesFromFlag loads instances from command line flag
+func (c *Config) loadInstancesFromFlag(myCnf *db.MyCnf) ([]string, error) {
+	var instanceList []string
+	rawInstances := strings.Split(c.Instances, ",")
+
+	for _, dsn := range rawInstances {
+		dsnToUse := strings.TrimSpace(dsn)
+		if dsnToUse == "" {
+			continue
+		}
+		dsnToUse = sanitizeDSN(dsnToUse) // Sanitize complex passwords
+		if myCnf != nil {
+			// Apply .my.cnf credentials respecting existing host info
+			if !dsnHasHost(dsnToUse) {
+				dsnToUse = db.FillDSN(dsnToUse, myCnf)
+			} else {
+				// Create a temporary cnf without host to fill other details
+				tempCnf := *myCnf
+				tempCnf.Host = "" // Don't override host from .my.cnf
+				dsnToUse = db.FillDSN(dsnToUse, &tempCnf)
+			}
+		}
+		instanceList = append(instanceList, dsnToUse)
+	}
+
+	return instanceList, nil
+}
+
+// LoadStatements loads SQL statements from various sources
+func (c *Config) LoadStatements() (string, error) {
+	if c.Stdin {
+		return c.loadStatementsFromStdin()
+	}
+	if c.SQLFile != "" {
+		return c.loadStatementsFromFile(c.SQLFile)
+	}
+	if c.File != "" {
+		return c.loadStatementsFromFile(c.File)
+	}
+	if c.Statements != "" {
+		return c.Statements, nil
+	}
+	return "", fmt.Errorf("no SQL statements provided")
+}
+
+// loadStatementsFromStdin reads SQL statements from standard input
+func (c *Config) loadStatementsFromStdin() (string, error) {
+	scanner := bufio.NewScanner(os.Stdin)
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("error reading from stdin: %w", err)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// loadStatementsFromFile reads SQL statements from a file
+func (c *Config) loadStatementsFromFile(filename string) (string, error) {
+	// Expand ~ to home directory
+	expandedPath, err := expandPath(filename)
+	if err != nil {
+		return "", fmt.Errorf("failed to expand file path: %w", err)
+	}
+	content, err := os.ReadFile(expandedPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+	return string(content), nil
+}
+
+// run contains the main application logic
+func run() error {
+	config := &Config{}
+
+	// Load configuration from flags
+	if err := config.LoadFromFlags(); err != nil {
+		return fmt.Errorf("failed to parse flags: %w", err)
+	}
+
+	// Validate configuration
+	if err := config.Validate(); err != nil {
+		return err
+	}
+
+	// Load instances
+	instanceList, err := config.LoadInstances()
+	if err != nil {
+		return fmt.Errorf("failed to load instances: %w", err)
 	}
 
 	if len(instanceList) == 0 {
-		fmt.Println("Error: No valid instances found after processing flags and files.")
-		os.Exit(1)
+		return fmt.Errorf("no valid instances found after processing flags and files")
 	}
 
-	// --- Load SQL Statements ---
-	var sqls string
-	if *stdin {
-		// Read from standard input
-		scanner := bufio.NewScanner(os.Stdin)
-		var lines []string
-		for scanner.Scan() {
-			lines = append(lines, scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
-			fmt.Printf("Error reading from stdin: %v\n", err)
-			os.Exit(1)
-		}
-		sqls = strings.Join(lines, "\n")
-	} else if *sqlFile != "" {
-		// Expand ~ to home directory
-		expandedPath, err := expandPath(*sqlFile)
-		if err != nil {
-			fmt.Printf("Failed to expand SQL file path: %v\n", err)
-			os.Exit(1)
-		}
-		content, err := os.ReadFile(expandedPath)
-		if err != nil {
-			fmt.Printf("Failed to read SQL file: %v\n", err)
-			os.Exit(1)
-		}
-		sqls = string(content)
-	} else if *file != "" {
-		// Expand ~ to home directory
-		expandedPath, err := expandPath(*file)
-		if err != nil {
-			fmt.Printf("Failed to expand file path: %v\n", err)
-			os.Exit(1)
-		}
-		content, err := os.ReadFile(expandedPath)
-		if err != nil {
-			fmt.Printf("Failed to read file: %v\n", err)
-			os.Exit(1)
-		}
-		sqls = string(content)
-	} else if *statements != "" {
-		sqls = *statements
-	} else {
-		fmt.Println("Error: must provide --stdin, --sqlfile, --file, or --statements")
-		os.Exit(1)
+	// Load SQL statements
+	sqls, err := config.LoadStatements()
+	if err != nil {
+		return fmt.Errorf("failed to load statements: %w", err)
 	}
 
+	// Execute queries
+	return executeQueries(config, instanceList, sqls)
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// executeQueries handles the execution of SQL queries against instances
+func executeQueries(config *Config, instanceList []string, sqls string) error {
 	// --- Assign colors to instances ---
 	instanceColorMap := make(map[string]*color.Color)
 	for i, instanceDSN := range instanceList {
@@ -302,57 +467,86 @@ func main() {
 	}
 
 	// --- Execute Concurrently or Sequentially ---
-	fmt.Printf("Executing statements on %d instance(s) (concurrent: %t)...\n", len(instanceList), *concurrent)
+	fmt.Printf("Executing statements on %d instance(s) (concurrent: %t)...\n", len(instanceList), config.Concurrent)
 
-	if *concurrent {
+	if config.Concurrent {
 		// --- Execute Concurrently ---
+		type instanceResult struct {
+			instance string
+			results  []db.QueryResult
+			err      error
+		}
+
 		var wg sync.WaitGroup
-		resultsChan := make(chan db.QueryResult) // Channel to receive results
+		resultsChan := make(chan instanceResult, len(instanceList)) // Buffered channel
 
 		for _, instanceDSN := range instanceList {
 			wg.Add(1)
 			go func(dsn string) {
-				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						resultsChan <- instanceResult{
+							instance: dsn,
+							err:      fmt.Errorf("panic in goroutine: %v", r),
+						}
+					}
+					wg.Done()
+				}()
+
 				// Run SQL for this specific instance
-				// TODO: Pass verbose parameter when db.RunSQLOnInstance supports it
-				_ = verbose // Use verbose variable to avoid "declared and not used" error
-				instanceResults := db.RunSQLOnInstance(dsn, sqls)
-				// Send each result (or error result) to the channel
-				for _, res := range instanceResults {
-					resultsChan <- res
+				instanceResults := db.RunSQLOnInstanceWithVerbosity(dsn, sqls, config.Verbose)
+				resultsChan <- instanceResult{
+					instance: dsn,
+					results:  instanceResults,
 				}
 			}(instanceDSN) // Pass instanceDSN to the goroutine
 		}
 
-		// Goroutine to close the channel once all workers are done
-		go func() {
-			wg.Wait()
-			close(resultsChan)
-		}()
+		// Wait for all goroutines to complete
+		wg.Wait()
+		close(resultsChan)
 
-		// Process results as they come in from the channel
-		for res := range resultsChan {
-			instanceColor := instanceColorMap[res.Instance] // Get color for this instance
-			// TODO: Pass verbose parameter when db.PrintResult supports it
-			db.PrintResult(res, instanceColor, *tableFormat) // Pass tableFormat flag
-			fmt.Println("---")                               // Separator between results
+		// Collect all results and maintain order
+		allResults := make(map[string][]db.QueryResult)
+		var errors []error
+
+		for result := range resultsChan {
+			if result.err != nil {
+				errors = append(errors, fmt.Errorf("instance %s: %w", result.instance, result.err))
+			} else {
+				allResults[result.instance] = result.results
+			}
+		}
+
+		// Print any goroutine errors
+		for _, err := range errors {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
+
+		// Print results in the original instance order
+		for _, instanceDSN := range instanceList {
+			if results, exists := allResults[instanceDSN]; exists {
+				instanceColor := instanceColorMap[instanceDSN]
+				for _, res := range results {
+					db.PrintResultWithVerbosity(res, instanceColor, config.TableFormat, config.Verbose)
+					fmt.Println("---")
+				}
+			}
 		}
 	} else {
 		// --- Execute Sequentially ---
 		for _, instanceDSN := range instanceList {
 			instanceColor := instanceColorMap[instanceDSN] // Get color for this instance
-			// TODO: Pass verbose parameter when db.RunSQLOnInstance supports it
-			_ = verbose // Use verbose variable to avoid "declared and not used" error
-			instanceResults := db.RunSQLOnInstance(instanceDSN, sqls)
+			instanceResults := db.RunSQLOnInstanceWithVerbosity(instanceDSN, sqls, config.Verbose)
 			for _, res := range instanceResults {
-				// TODO: Pass verbose parameter when db.PrintResult supports it
-				db.PrintResult(res, instanceColor, *tableFormat) // Pass tableFormat flag
-				fmt.Println("---")                               // Separator between results
+				db.PrintResultWithVerbosity(res, instanceColor, config.TableFormat, config.Verbose)
+				fmt.Println("---") // Separator between results
 			}
 		}
 	}
 
 	fmt.Println("All executions complete.")
+	return nil
 }
 
 // sanitizeDSN safely handles complex passwords by URL encoding them
