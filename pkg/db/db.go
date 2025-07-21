@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	// Needed for robust DSN parsing
 	"github.com/fatih/color"
@@ -28,11 +29,18 @@ type QueryResult struct {
 	Rows           [][]interface{}
 	Columns        []string
 	Err            error
-	VerticalFormat bool // Flag to indicate vertical output
+	VerticalFormat bool          // Flag to indicate vertical output
+	Duration       time.Duration // Query execution time
+	RowCount       int           // Number of rows returned
 }
 
 // RunSQLOnInstance connects to a single instance and executes all SQL statements.
 func RunSQLOnInstance(instanceDSN string, sqls string) []QueryResult {
+	return RunSQLOnInstanceWithVerbosity(instanceDSN, sqls, 0)
+}
+
+// RunSQLOnInstanceWithVerbosity connects to a single instance and executes all SQL statements with verbosity control.
+func RunSQLOnInstanceWithVerbosity(instanceDSN string, sqls string, verbose int) []QueryResult {
 	statementList := splitSQLStatements(sqls) // Now returns []StatementInfo
 	results := []QueryResult{}
 
@@ -63,9 +71,19 @@ func RunSQLOnInstance(instanceDSN string, sqls string) []QueryResult {
 			originalStmt += "\\G" // Add back for display if needed, or just use the flag
 		}
 
+		// Time the query execution
+		startTime := time.Now()
 		rows, err := db.Query(stmtToExecute)
+		duration := time.Since(startTime)
+
 		if err != nil {
-			results = append(results, QueryResult{Instance: instanceDSN, Statement: originalStmt, Err: fmt.Errorf("query error: %w", err), VerticalFormat: stmtInfo.Vertical})
+			results = append(results, QueryResult{
+				Instance:       instanceDSN,
+				Statement:      originalStmt,
+				Err:            fmt.Errorf("query error: %w", err),
+				VerticalFormat: stmtInfo.Vertical,
+				Duration:       duration,
+			})
 			continue // Move to the next statement
 		}
 
@@ -123,6 +141,8 @@ func RunSQLOnInstance(instanceDSN string, sqls string) []QueryResult {
 			Columns:        cols,
 			Err:            err, // Includes potential scan/column errors
 			VerticalFormat: stmtInfo.Vertical,
+			Duration:       duration,
+			RowCount:       len(allRows),
 		})
 		rows.Close() // Close rows as soon as possible
 	}
@@ -130,28 +150,115 @@ func RunSQLOnInstance(instanceDSN string, sqls string) []QueryResult {
 	return results
 }
 
-// splitSQLStatements splits SQL string and detects \G
+// splitSQLStatements splits SQL string and detects \G, handling semicolons in strings and comments
 func splitSQLStatements(sqls string) []StatementInfo {
 	var statements []StatementInfo
-	// Basic split, doesn't handle semicolons in strings/comments well
-	rawStatements := strings.Split(sqls, ";")
-	for _, s := range rawStatements {
-		trimmed := strings.TrimSpace(s)
-		if trimmed == "" {
+	var currentStatement strings.Builder
+	var inSingleQuote, inDoubleQuote, inBacktick bool
+	var inLineComment, inBlockComment bool
+
+	runes := []rune(sqls)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+
+		// Handle escape sequences in strings
+		if (inSingleQuote || inDoubleQuote || inBacktick) && r == '\\' && i+1 < len(runes) {
+			currentStatement.WriteRune(r)
+			i++ // Skip next character
+			if i < len(runes) {
+				currentStatement.WriteRune(runes[i])
+			}
 			continue
 		}
 
-		info := StatementInfo{SQL: trimmed, Vertical: false}
-		if strings.HasSuffix(trimmed, "\\G") {
-			info.Vertical = true
-			// Remove \G for execution
-			info.SQL = strings.TrimSpace(trimmed[:len(trimmed)-2])
+		// Handle comments
+		if !inSingleQuote && !inDoubleQuote && !inBacktick {
+			// Start of line comment
+			if r == '-' && i+1 < len(runes) && runes[i+1] == '-' {
+				inLineComment = true
+				currentStatement.WriteRune(r)
+				continue
+			}
+			// Start of block comment
+			if r == '/' && i+1 < len(runes) && runes[i+1] == '*' {
+				inBlockComment = true
+				currentStatement.WriteRune(r)
+				continue
+			}
+			// End of block comment
+			if inBlockComment && r == '*' && i+1 < len(runes) && runes[i+1] == '/' {
+				inBlockComment = false
+				currentStatement.WriteRune(r)
+				i++ // Skip the '/'
+				if i < len(runes) {
+					currentStatement.WriteRune(runes[i])
+				}
+				continue
+			}
 		}
-		// Only add if the SQL part is not empty after removing \G
-		if info.SQL != "" {
-			statements = append(statements, info)
+
+		// End line comment on newline
+		if inLineComment && (r == '\n' || r == '\r') {
+			inLineComment = false
+		}
+
+		// Handle string delimiters (only if not in comments)
+		if !inLineComment && !inBlockComment {
+			switch r {
+			case '\'':
+				if !inDoubleQuote && !inBacktick {
+					inSingleQuote = !inSingleQuote
+				}
+			case '"':
+				if !inSingleQuote && !inBacktick {
+					inDoubleQuote = !inDoubleQuote
+				}
+			case '`':
+				if !inSingleQuote && !inDoubleQuote {
+					inBacktick = !inBacktick
+				}
+			}
+		}
+
+		// Handle semicolon (statement separator)
+		if r == ';' && !inSingleQuote && !inDoubleQuote && !inBacktick && !inLineComment && !inBlockComment {
+			// End of statement
+			stmt := strings.TrimSpace(currentStatement.String())
+			if stmt != "" {
+				info := StatementInfo{SQL: stmt, Vertical: false}
+				if strings.HasSuffix(stmt, "\\G") {
+					info.Vertical = true
+					// Remove \G for execution
+					info.SQL = strings.TrimSpace(stmt[:len(stmt)-2])
+				}
+				// Only add if the SQL part is not empty after removing \G
+				if info.SQL != "" {
+					statements = append(statements, info)
+				}
+			}
+			currentStatement.Reset()
+		} else {
+			currentStatement.WriteRune(r)
 		}
 	}
+
+	// Handle the last statement if it doesn't end with semicolon
+	if currentStatement.Len() > 0 {
+		stmt := strings.TrimSpace(currentStatement.String())
+		if stmt != "" {
+			info := StatementInfo{SQL: stmt, Vertical: false}
+			if strings.HasSuffix(stmt, "\\G") {
+				info.Vertical = true
+				// Remove \G for execution
+				info.SQL = strings.TrimSpace(stmt[:len(stmt)-2])
+			}
+			// Only add if the SQL part is not empty after removing \G
+			if info.SQL != "" {
+				statements = append(statements, info)
+			}
+		}
+	}
+
 	return statements
 }
 
@@ -192,21 +299,45 @@ func maskPasswordInDSN(dsn string) string {
 }
 
 // PrintResult prints the query result, handling vertical and table formats.
-func PrintResult(res QueryResult, instanceColor *color.Color, useTableFormat bool) { // Added useTableFormat param
+func PrintResult(res QueryResult, instanceColor *color.Color, useTableFormat bool) {
+	PrintResultWithVerbosity(res, instanceColor, useTableFormat, 0)
+}
+
+// PrintResultWithVerbosity prints the query result with verbosity control.
+func PrintResultWithVerbosity(res QueryResult, instanceColor *color.Color, useTableFormat bool, verbose int) {
 	maskedDSN := maskPasswordInDSN(res.Instance)                     // Mask the password
 	instanceStr := instanceColor.SprintFunc()("[" + maskedDSN + "]") // Use masked DSN
+
 	if res.Err != nil {
 		errorColor := color.New(color.FgRed).SprintFunc()
 		fmt.Printf("%s %s %s: %v\n", instanceStr, errorColor("ERROR"), res.Statement, res.Err)
 		return
 	}
+
+	// Verbosity level 1 and above: Show statement separators
+	if verbose >= 1 {
+		fmt.Println(strings.Repeat("-", 14))
+	}
+
 	fmt.Printf("%s %s\n", instanceStr, res.Statement)
+
+	// Verbosity level 3: Show timing information
+	if verbose >= 3 {
+		fmt.Printf("Query time: %v\n", res.Duration)
+	}
 
 	if res.VerticalFormat {
 		// --- Vertical Output ---
-		// ... (vertical logic remains the same) ...
 		if len(res.Rows) == 0 {
 			fmt.Println("Empty set.")
+			// Verbosity level 2 and above: Show row count
+			if verbose >= 2 {
+				fmt.Printf("(%d rows in set", res.RowCount)
+				if verbose >= 3 {
+					fmt.Printf(" (%v)", res.Duration)
+				}
+				fmt.Println(")")
+			}
 			return
 		}
 		rowSeparator := strings.Repeat("*", 20)
@@ -230,14 +361,38 @@ func PrintResult(res QueryResult, instanceColor *color.Color, useTableFormat boo
 				fmt.Printf("%*s: %s\n", maxColWidth, colName, valStr)
 			}
 		}
+		// Verbosity level 2 and above: Show row count for vertical format
+		if verbose >= 2 {
+			fmt.Printf("(%d rows in set", res.RowCount)
+			if verbose >= 3 {
+				fmt.Printf(" (%v)", res.Duration)
+			}
+			fmt.Println(")")
+		}
 	} else if useTableFormat {
 		// --- Table Writer Output ---
 		if len(res.Columns) == 0 {
 			fmt.Println("Statement executed successfully, no columns returned.")
+			// Verbosity level 2 and above: Show timing for non-select statements
+			if verbose >= 2 {
+				fmt.Printf("Query OK")
+				if verbose >= 3 {
+					fmt.Printf(" (%v)", res.Duration)
+				}
+				fmt.Println()
+			}
 			return
 		}
 		if len(res.Rows) == 0 {
 			fmt.Println("Empty set.")
+			// Verbosity level 2 and above: Show row count
+			if verbose >= 2 {
+				fmt.Printf("(%d rows in set", res.RowCount)
+				if verbose >= 3 {
+					fmt.Printf(" (%v)", res.Duration)
+				}
+				fmt.Println(")")
+			}
 			return
 		}
 
@@ -274,17 +429,41 @@ func PrintResult(res QueryResult, instanceColor *color.Color, useTableFormat boo
 		table.AppendBulk(data)
 		table.Render()
 
+		// Verbosity level 2 and above: Show row count for table format
+		if verbose >= 2 {
+			fmt.Printf("(%d rows in set", res.RowCount)
+			if verbose >= 3 {
+				fmt.Printf(" (%v)", res.Duration)
+			}
+			fmt.Println(")")
+		}
+
 	} else {
 		// --- Standard Tabular Output (Default) ---
-		// ... (existing default tabular logic remains the same) ...
 		if len(res.Columns) == 0 {
 			fmt.Println("Statement executed successfully, no columns returned.")
+			// Verbosity level 2 and above: Show timing for non-select statements
+			if verbose >= 2 {
+				fmt.Printf("Query OK")
+				if verbose >= 3 {
+					fmt.Printf(" (%v)", res.Duration)
+				}
+				fmt.Println()
+			}
 			return
 		}
 		bold := color.New(color.Bold).SprintFunc()
 		fmt.Println(bold(strings.Join(res.Columns, "\t")))
 		if len(res.Rows) == 0 {
 			fmt.Println("Empty set.")
+			// Verbosity level 2 and above: Show row count
+			if verbose >= 2 {
+				fmt.Printf("(%d rows in set", res.RowCount)
+				if verbose >= 3 {
+					fmt.Printf(" (%v)", res.Duration)
+				}
+				fmt.Println(")")
+			}
 			return
 		}
 		for _, row := range res.Rows {
@@ -299,6 +478,14 @@ func PrintResult(res QueryResult, instanceColor *color.Color, useTableFormat boo
 				}
 			}
 			fmt.Println(strings.Join(rowStrings, "\t"))
+		}
+		// Verbosity level 2 and above: Show row count for standard format
+		if verbose >= 2 {
+			fmt.Printf("(%d rows in set", res.RowCount)
+			if verbose >= 3 {
+				fmt.Printf(" (%v)", res.Duration)
+			}
+			fmt.Println(")")
 		}
 	}
 }
